@@ -142,11 +142,21 @@ fn print_usage(opts: &getopts::Options) -> ! {
     std::process::exit(1);
 }
 
+// Rust does not have anonymous struct and union types yet...
+#[derive(Serialize, Debug, Default)]
+struct VarChildren {
+    name: String,
+    addr: u64,
+    size: usize,
+}
+
 #[derive(Serialize, Debug, Default)]
 pub struct Variable {
     // The variable name is the key of the hashmap.
     cu_name: Rc<String>,
     addr: u64,
+    size: usize,
+    children: Vec<VarChildren>,
 }
 
 pub fn parse<'input, Endian>(elf: &xmas_elf::ElfFile<'input>,
@@ -186,6 +196,10 @@ fn parse_unit<'input, Endian>(
     let mut cu_name = None;
 
     if let Some((_, cudie)) = cursor.next_dfs()? {
+        if cudie.tag() != gimli::DW_TAG_compile_unit {
+            return Err(Error(Cow::from("wrong CU DIE")));
+        }
+
         if let Some(at_name) = cudie.attr(gimli::DW_AT_name)? {
             if let Some(s) = at_name.string_value(dbg_string) {
                 let ss = try!(s.to_str());
@@ -214,15 +228,9 @@ fn parse_unit<'input, Endian>(
 		}
 
 		match current.tag() {
-			gimli::DW_TAG_compile_unit => {
-                println!("break in CU");
-                return Ok(out);
-            }
 			gimli::DW_TAG_namespace => {
-				//parse_namespace(unit, dwarf, dwarf_unit, namespace, child)?;
 			}
 			gimli::DW_TAG_subprogram => {
-				//parse_subprogram(unit, dwarf, dwarf_unit, namespace, child)?;
 			}
 			gimli::DW_TAG_variable => {
                 add_variable(current, cu_name.clone(), dbg_string, &mut out)?;
@@ -237,8 +245,6 @@ fn parse_unit<'input, Endian>(
 				gimli::DW_TAG_const_type |
 				gimli::DW_TAG_pointer_type |
 				gimli::DW_TAG_restrict_type => {
-					//let ty = parse_type(unit, dwarf, dwarf_unit, namespace, child)?;
-					//unit.types.insert(offset.0, ty);
 				}
 			tag => {
 				debug!("unknown namespace child tag: {}", tag);
@@ -261,7 +267,7 @@ fn add_variable<'input, 'abbrev,
 
 
     let mut name = None;
-    let mut var  = Variable{cu_name: cu_name, addr: 0};
+    let mut var = Variable{cu_name: cu_name, ..Default::default()};
 
     let mut attrs = die.attrs();
     while let Some(attr) = attrs.next()? {
