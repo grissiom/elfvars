@@ -35,8 +35,8 @@ impl error::Error for Error {
 }
 
 impl fmt::Display for Error {
-    fn fmt(&self,  f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f,  "{}",  self.0)
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 
@@ -54,19 +54,19 @@ impl From<String> for Error {
 
 impl From<std::io::Error> for Error {
     fn from(e: std::io::Error) -> Error {
-        Error(Cow::Owned(format!("IO error: {}",  e)))
+        Error(Cow::Owned(format!("IO error: {}", e)))
     }
 }
 
 impl From<std::str::Utf8Error> for Error {
     fn from(e: std::str::Utf8Error) -> Error {
-        Error(Cow::Owned(format!("UTF-8 error: {}",  e)))
+        Error(Cow::Owned(format!("UTF-8 error: {}", e)))
     }
 }
 
 impl From<gimli::Error> for Error {
     fn from(e: gimli::Error) -> Error {
-        Error(Cow::Owned(format!("DWARF error: {}",  e)))
+        Error(Cow::Owned(format!("DWARF error: {}", e)))
     }
 }
 
@@ -87,10 +87,10 @@ fn main() {
 
     if matches.free.len() != 1 {
         error!("Invalid filename arguments (expected 1 filename, found {})",
-        matches.free.len());
+               matches.free.len());
         print_usage(&opts);
     }
-	let path = &matches.free[0];
+    let path = &matches.free[0];
 
     let mut file = match fs::File::open(path) {
         Ok(file) => file,
@@ -159,8 +159,7 @@ pub struct Variable {
     children: Vec<VarChildren>,
 }
 
-pub fn parse<'input, Endian>(elf: &xmas_elf::ElfFile<'input>,
-                            ) -> Result<HashMap<String, Variable>>
+pub fn parse<'input, Endian>(elf: &xmas_elf::ElfFile<'input>) -> Result<HashMap<String, Variable>>
     where Endian: gimli::Endianity + std::marker::Send
 {
     let mut out = HashMap::new();
@@ -181,11 +180,10 @@ pub fn parse<'input, Endian>(elf: &xmas_elf::ElfFile<'input>,
     Ok(out)
 }
 
-fn parse_unit<'input, Endian>(
-    unit_header: &gimli::CompilationUnitHeader<'input, Endian>,
-    dbg_abbrev: &gimli::DebugAbbrev<'input, Endian>,
-    dbg_string: &gimli::DebugStr<'input, Endian>,
-) -> Result<HashMap<String, Variable>>
+fn parse_unit<'input, Endian>(unit_header: &gimli::CompilationUnitHeader<'input, Endian>,
+                              dbg_abbrev: &gimli::DebugAbbrev<'input, Endian>,
+                              dbg_string: &gimli::DebugStr<'input, Endian>)
+                              -> Result<HashMap<String, Variable>>
     where Endian: gimli::Endianity
 {
     let mut out = HashMap::new();
@@ -216,58 +214,56 @@ fn parse_unit<'input, Endian>(
 
     let cu_name = cu_name.unwrap();
 
-	// Keep looping while the cursor is moving deeper into the DIE tree.
-	while let Some((delta_depth, current)) = cursor.next_dfs()? {
-		// 0 means we moved to a sibling, a negative number means we went back
-		// up to a parent's sibling. In either case, bail out of the loop because
-		//  we aren't going deeper into the tree anymore.
-		if delta_depth <= 0 {
-            debug!("break when {}, {:?}",
-                   delta_depth, current.tag());
-			//break;
-		}
+    // Keep looping while the cursor is moving deeper into the DIE tree.
+    while let Some((delta_depth, current)) = cursor.next_dfs()? {
+        // 0 means we moved to a sibling, a negative number means we went back
+        // up to a parent's sibling. In either case, bail out of the loop because
+        //  we aren't going deeper into the tree anymore.
+        if delta_depth <= 0 {
+            debug!("break when {}, {:?}", delta_depth, current.tag());
+            //break;
+        }
 
-		match current.tag() {
-			gimli::DW_TAG_namespace => {
-			}
-			gimli::DW_TAG_subprogram => {
-			}
-			gimli::DW_TAG_variable => {
+        match current.tag() {
+            gimli::DW_TAG_namespace => {}
+            gimli::DW_TAG_subprogram => {}
+            gimli::DW_TAG_variable => {
                 add_variable(current, cu_name.clone(), dbg_string, &mut out)?;
-			}
-			gimli::DW_TAG_base_type |
-				gimli::DW_TAG_structure_type |
-				gimli::DW_TAG_union_type |
-				gimli::DW_TAG_enumeration_type |
-				gimli::DW_TAG_array_type |
-				gimli::DW_TAG_subroutine_type |
-				gimli::DW_TAG_typedef |
-				gimli::DW_TAG_const_type |
-				gimli::DW_TAG_pointer_type |
-				gimli::DW_TAG_restrict_type => {
-				}
-			tag => {
-				debug!("unknown namespace child tag: {}", tag);
-			}
-		}
-	}
+            }
+            gimli::DW_TAG_base_type |
+            gimli::DW_TAG_structure_type |
+            gimli::DW_TAG_union_type |
+            gimli::DW_TAG_enumeration_type |
+            gimli::DW_TAG_array_type |
+            gimli::DW_TAG_subroutine_type |
+            gimli::DW_TAG_typedef |
+            gimli::DW_TAG_const_type |
+            gimli::DW_TAG_pointer_type |
+            gimli::DW_TAG_restrict_type => {}
+            tag => {
+                debug!("unknown namespace child tag: {}", tag);
+            }
+        }
+    }
 
     Ok(out)
 }
 
-fn add_variable<'input, 'abbrev,
-   'unit, Endian>(die: &gimli::DebuggingInformationEntry<'input, 'abbrev, 'unit, Endian>,
-                  cu_name: Rc<String>,
-                  dbg_string: &gimli::DebugStr<'input, Endian>,
-                  out: &mut HashMap<String, Variable>
-                               ) -> Result<()>
-    where Endian: gimli::Endianity,
+fn add_variable<'input, 'abbrev, 'unit, Endian>(die: &gimli::DebuggingInformationEntry<'input,
+                                                                                       'abbrev,
+                                                                                       'unit,
+                                                                                       Endian>,
+                                                cu_name: Rc<String>,
+                                                dbg_string: &gimli::DebugStr<'input, Endian>,
+                                                out: &mut HashMap<String, Variable>)
+                                                -> Result<()>
+    where Endian: gimli::Endianity
 {
     assert!(die.tag() == gimli::DW_TAG_variable);
 
 
     let mut name = None;
-    let mut var = Variable{cu_name: cu_name, ..Default::default()};
+    let mut var = Variable { cu_name: cu_name, ..Default::default() };
 
     let mut attrs = die.attrs();
     while let Some(attr) = attrs.next()? {
@@ -278,8 +274,7 @@ fn add_variable<'input, 'abbrev,
                     name = Some(ss.to_string());
                 }
             }
-            gimli::DW_AT_linkage_name => {
-            }
+            gimli::DW_AT_linkage_name => {}
             gimli::DW_AT_type => {
                 if let gimli::AttributeValue::UnitRef(offset) = attr.value() {
                     //variable.ty = Some(offset);
@@ -300,13 +295,9 @@ fn add_variable<'input, 'abbrev,
                         if let Some((&first, elements)) = buf.split_first() {
                             if gimli::DwOp(first) == gimli::DW_OP_addr {
                                 var.addr = match elements.len() {
-                                    4 => {
-                                        Endian::read_u32(elements) as u64
-                                    }
-                                    8 => {
-                                        Endian::read_u64(elements)
-                                    }
-                                    _ => 0
+                                    4 => Endian::read_u32(elements) as u64,
+                                    8 => Endian::read_u64(elements),
+                                    _ => 0,
                                 }
                             } else {
                                 // We only interest on variables that has fixed address.
@@ -321,7 +312,7 @@ fn add_variable<'input, 'abbrev,
                 }
             }
             gimli::DW_AT_artificial |
-                gimli::DW_AT_external => {
+            gimli::DW_AT_external => {
                 if let gimli::AttributeValue::Flag(flag) = attr.value() {
                     if flag {
                         // We only interest on concrete varibles.
@@ -330,9 +321,9 @@ fn add_variable<'input, 'abbrev,
                 }
             }
             gimli::DW_AT_abstract_origin |
-                gimli::DW_AT_const_value |
-                gimli::DW_AT_decl_file |
-                gimli::DW_AT_decl_line => {}
+            gimli::DW_AT_const_value |
+            gimli::DW_AT_decl_file |
+            gimli::DW_AT_decl_line => {}
             _ => {
                 debug!("unknown variable attribute: {} {:?}",
                        attr.name(),
