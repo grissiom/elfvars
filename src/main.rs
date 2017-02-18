@@ -156,21 +156,26 @@ pub fn parse<'input, Endian>(elf: &xmas_elf::ElfFile<'input>,
     let debug_str = gimli::DebugStr::<Endian>::new(debug_str.unwrap_or(&[]));
 
     let mut unit_headers = debug_info.units();
+
     let mut cu_cnt = 0;
-    let mut pool = scoped_threadpool::Pool::new(6);
     let (tx, rx) = mpsc::channel();
-    pool.scoped(|scope| {
-        while let Some(unit_header) = unit_headers.next().unwrap() {
+    let mut pool = scoped_threadpool::Pool::new(8);
+    pool.scoped(|scope| -> Result<()> {
+        while let Some(unit_header) = unit_headers.next()? {
             cu_cnt += 1;
             let tx = tx.clone();
             scope.execute(move || {
-                let m = parse_unit(&unit_header, &debug_abbrev, &debug_str).unwrap();
-                tx.send(m).unwrap();
+                match parse_unit(&unit_header, &debug_abbrev, &debug_str) {
+                    Ok(m) => tx.send(m).unwrap(),
+                    Err(e) => error!("{}", e),
+                }
             })
         }
-    });
+        Ok(())
+    })?;
 
     rx.iter().take(cu_cnt).fold(&mut out, |acc, cur| {acc.extend(cur); acc});
+
     Ok(out)
 }
 
