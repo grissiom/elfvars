@@ -9,11 +9,13 @@ use std::error;
 use std::result;
 use std::fmt::{self, Debug};
 use std::collections::HashMap;
+use std::sync::mpsc;
 
 #[macro_use]
 extern crate serde_derive;
-
 extern crate serde_json;
+
+extern crate scoped_threadpool;
 
 extern crate getopts;
 #[macro_use]
@@ -105,10 +107,8 @@ fn main() {
         return;
     }
 
-    let mut result = HashMap::new();
-
-    match parse_data(buffer.as_slice(), &mut result) {
-        Ok(_) => {
+    match parse_data(buffer.as_slice()) {
+        Ok(result) => {
             println!("{}", serde_json::to_string_pretty(&result).unwrap())
         }
         Err(e) => {
@@ -118,12 +118,12 @@ fn main() {
     }
 }
 
-pub fn parse_data<'input>(buffer: &'input [u8], out: &mut HashMap<String, u64>) -> Result<()> {
+pub fn parse_data<'input>(buffer: &'input [u8]) -> Result<HashMap<String, u64>> {
     let elf = xmas_elf::ElfFile::new(buffer);
 
     match elf.header.pt1.data {
-        xmas_elf::header::Data::LittleEndian => parse::<gimli::LittleEndian>(&elf, out),
-        xmas_elf::header::Data::BigEndian => parse::<gimli::BigEndian>(&elf, out),
+        xmas_elf::header::Data::LittleEndian => parse::<gimli::LittleEndian>(&elf),
+        xmas_elf::header::Data::BigEndian => parse::<gimli::BigEndian>(&elf),
         _ => {
             return Err("Unknown endianity".into());
         }
@@ -143,9 +143,11 @@ pub struct Variable {
 }
 
 pub fn parse<'input, Endian>(elf: &xmas_elf::ElfFile<'input>,
-                             out: &mut HashMap<String, u64>) -> Result<()>
-    where Endian: gimli::Endianity
+                            ) -> Result<HashMap<String, u64>>
+    where Endian: gimli::Endianity + std::marker::Send
 {
+    let mut out = HashMap::new();
+
     let debug_abbrev = elf.find_section_by_name(".debug_abbrev").map(|s| s.raw_data(elf));
     let debug_abbrev = gimli::DebugAbbrev::<Endian>::new(debug_abbrev.unwrap_or(&[]));
     let debug_info = elf.find_section_by_name(".debug_info").map(|s| s.raw_data(elf));
@@ -154,22 +156,33 @@ pub fn parse<'input, Endian>(elf: &xmas_elf::ElfFile<'input>,
     let debug_str = gimli::DebugStr::<Endian>::new(debug_str.unwrap_or(&[]));
 
     let mut unit_headers = debug_info.units();
-    while let Some(unit_header) = unit_headers.next()? {
-        //println!("parse unit@ {:?}", unit_header.offset());
-        parse_unit(&unit_header, debug_abbrev, debug_str, out)?;
-    }
-    Ok(())
+    let mut cu_cnt = 0;
+    let mut pool = scoped_threadpool::Pool::new(6);
+    let (tx, rx) = mpsc::channel();
+    pool.scoped(|scope| {
+        while let Some(unit_header) = unit_headers.next().unwrap() {
+            cu_cnt += 1;
+            let tx = tx.clone();
+            scope.execute(move || {
+                let m = parse_unit(&unit_header, &debug_abbrev, &debug_str).unwrap();
+                tx.send(m).unwrap();
+            })
+        }
+    });
+
+    rx.iter().take(cu_cnt).fold(&mut out, |acc, cur| {acc.extend(cur); acc});
+    Ok(out)
 }
 
 fn parse_unit<'input, Endian>(
     unit_header: &gimli::CompilationUnitHeader<'input, Endian>,
-    dbg_abbrev: gimli::DebugAbbrev<'input, Endian>,
-    dbg_string: gimli::DebugStr<'input, Endian>,
-    out: &mut HashMap<String, u64>
-) -> Result<()>
+    dbg_abbrev: &gimli::DebugAbbrev<'input, Endian>,
+    dbg_string: &gimli::DebugStr<'input, Endian>,
+) -> Result<HashMap<String, u64>>
     where Endian: gimli::Endianity
 {
-    let abbrev = &unit_header.abbreviations(dbg_abbrev)?;
+    let mut out = HashMap::new();
+    let abbrev = &unit_header.abbreviations(*dbg_abbrev)?;
 
     let mut cursor = unit_header.entries(abbrev);
     // Move the cursor to the root.
@@ -189,7 +202,7 @@ fn parse_unit<'input, Endian>(
 		match current.tag() {
 			gimli::DW_TAG_compile_unit => {
                 println!("break in CU");
-                return Ok(());
+                return Ok(out);
             }
 			gimli::DW_TAG_namespace => {
 				//parse_namespace(unit, dwarf, dwarf_unit, namespace, child)?;
@@ -199,7 +212,7 @@ fn parse_unit<'input, Endian>(
 			}
 			gimli::DW_TAG_variable => {
 				//vars.push(Variable{CIE: current});
-                add_variable(current, dbg_string, out)?;
+                add_variable(current, dbg_string, &mut out)?;
 			}
 			gimli::DW_TAG_base_type |
 				gimli::DW_TAG_structure_type |
@@ -220,12 +233,12 @@ fn parse_unit<'input, Endian>(
 		}
 	}
 
-    Ok(())
+    Ok(out)
 }
 
 fn add_variable<'input, 'abbrev, 'unit, Endian>(die: &gimli::DebuggingInformationEntry<'input,
                                                 'abbrev, 'unit, Endian>,
-                                dbg_string: gimli::DebugStr<'input, Endian>,
+                                dbg_string: &gimli::DebugStr<'input, Endian>,
                                 out: &mut HashMap<String, u64>
                                ) -> Result<()>
     where Endian: gimli::Endianity,
