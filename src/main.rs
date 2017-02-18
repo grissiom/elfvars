@@ -9,13 +9,11 @@ use std::error;
 use std::result;
 use std::fmt::{self, Debug};
 use std::collections::HashMap;
-use std::sync::mpsc;
+use std::rc::Rc;
 
 #[macro_use]
 extern crate serde_derive;
 extern crate serde_json;
-
-extern crate scoped_threadpool;
 
 extern crate getopts;
 #[macro_use]
@@ -28,7 +26,7 @@ extern crate xmas_elf;
 //mod dwarf;
 
 #[derive(Debug)]
-pub struct Error(pub Cow<'static,  str>);
+pub struct Error(pub Cow<'static, str>);
 
 impl error::Error for Error {
     fn description(&self) -> &str {
@@ -77,7 +75,8 @@ pub type Result<T> = result::Result<T, Error>;
 fn main() {
     env_logger::init().unwrap();
 
-    let opts = getopts::Options::new();
+    let mut opts = getopts::Options::new();
+    opts.optopt("o", "output", "Set output file name", "FILE");
     let matches = match opts.parse(env::args().skip(1)) {
         Ok(m) => m,
         Err(e) => {
@@ -109,7 +108,14 @@ fn main() {
 
     match parse_data(buffer.as_slice()) {
         Ok(result) => {
-            println!("{}", serde_json::to_string_pretty(&result).unwrap())
+            let data = serde_json::to_string_pretty(&result).unwrap();
+
+            if let Some(fname) = matches.opt_str("o") {
+                let mut file = fs::File::create(fname).unwrap();
+                file.write_all(data.as_bytes()).unwrap();
+            } else {
+                println!("{}", data);
+            }
         }
         Err(e) => {
             error!("{}: {}", path, e);
@@ -118,7 +124,7 @@ fn main() {
     }
 }
 
-pub fn parse_data<'input>(buffer: &'input [u8]) -> Result<HashMap<String, u64>> {
+pub fn parse_data<'input>(buffer: &'input [u8]) -> Result<HashMap<String, Variable>> {
     let elf = xmas_elf::ElfFile::new(buffer);
 
     match elf.header.pt1.data {
@@ -138,12 +144,13 @@ fn print_usage(opts: &getopts::Options) -> ! {
 
 #[derive(Serialize, Debug, Default)]
 pub struct Variable {
-    name: String,
+    // The variable name is the key of the hashmap.
+    cu_name: Rc<String>,
     addr: u64,
 }
 
 pub fn parse<'input, Endian>(elf: &xmas_elf::ElfFile<'input>,
-                            ) -> Result<HashMap<String, u64>>
+                            ) -> Result<HashMap<String, Variable>>
     where Endian: gimli::Endianity + std::marker::Send
 {
     let mut out = HashMap::new();
@@ -157,24 +164,9 @@ pub fn parse<'input, Endian>(elf: &xmas_elf::ElfFile<'input>,
 
     let mut unit_headers = debug_info.units();
 
-    let mut cu_cnt = 0;
-    let (tx, rx) = mpsc::channel();
-    let mut pool = scoped_threadpool::Pool::new(8);
-    pool.scoped(|scope| -> Result<()> {
-        while let Some(unit_header) = unit_headers.next()? {
-            cu_cnt += 1;
-            let tx = tx.clone();
-            scope.execute(move || {
-                match parse_unit(&unit_header, &debug_abbrev, &debug_str) {
-                    Ok(m) => tx.send(m).unwrap(),
-                    Err(e) => error!("{}", e),
-                }
-            })
-        }
-        Ok(())
-    })?;
-
-    rx.iter().take(cu_cnt).fold(&mut out, |acc, cur| {acc.extend(cur); acc});
+    while let Some(unit_header) = unit_headers.next()? {
+        out.extend(parse_unit(&unit_header, &debug_abbrev, &debug_str)?);
+    }
 
     Ok(out)
 }
@@ -183,15 +175,32 @@ fn parse_unit<'input, Endian>(
     unit_header: &gimli::CompilationUnitHeader<'input, Endian>,
     dbg_abbrev: &gimli::DebugAbbrev<'input, Endian>,
     dbg_string: &gimli::DebugStr<'input, Endian>,
-) -> Result<HashMap<String, u64>>
+) -> Result<HashMap<String, Variable>>
     where Endian: gimli::Endianity
 {
     let mut out = HashMap::new();
     let abbrev = &unit_header.abbreviations(*dbg_abbrev)?;
 
     let mut cursor = unit_header.entries(abbrev);
-    // Move the cursor to the root.
-    assert!(cursor.next_dfs().unwrap().is_some());
+
+    let mut cu_name = None;
+
+    if let Some((_, cudie)) = cursor.next_dfs()? {
+        if let Some(at_name) = cudie.attr(gimli::DW_AT_name)? {
+            if let Some(s) = at_name.string_value(dbg_string) {
+                let ss = try!(s.to_str());
+                cu_name = Some(Rc::new(ss.to_string()));
+            }
+        }
+    } else {
+        return Err(Error(Cow::from("wrong CU DIE")));
+    }
+
+    if cu_name.is_none() {
+        return Err(Error(Cow::from("no CU name")));
+    }
+
+    let cu_name = cu_name.unwrap();
 
 	// Keep looping while the cursor is moving deeper into the DIE tree.
 	while let Some((delta_depth, current)) = cursor.next_dfs()? {
@@ -216,8 +225,7 @@ fn parse_unit<'input, Endian>(
 				//parse_subprogram(unit, dwarf, dwarf_unit, namespace, child)?;
 			}
 			gimli::DW_TAG_variable => {
-				//vars.push(Variable{CIE: current});
-                add_variable(current, dbg_string, &mut out)?;
+                add_variable(current, cu_name.clone(), dbg_string, &mut out)?;
 			}
 			gimli::DW_TAG_base_type |
 				gimli::DW_TAG_structure_type |
@@ -241,10 +249,11 @@ fn parse_unit<'input, Endian>(
     Ok(out)
 }
 
-fn add_variable<'input, 'abbrev, 'unit, Endian>(die: &gimli::DebuggingInformationEntry<'input,
-                                                'abbrev, 'unit, Endian>,
-                                dbg_string: &gimli::DebugStr<'input, Endian>,
-                                out: &mut HashMap<String, u64>
+fn add_variable<'input, 'abbrev,
+   'unit, Endian>(die: &gimli::DebuggingInformationEntry<'input, 'abbrev, 'unit, Endian>,
+                  cu_name: Rc<String>,
+                  dbg_string: &gimli::DebugStr<'input, Endian>,
+                  out: &mut HashMap<String, Variable>
                                ) -> Result<()>
     where Endian: gimli::Endianity,
 {
@@ -252,7 +261,7 @@ fn add_variable<'input, 'abbrev, 'unit, Endian>(die: &gimli::DebuggingInformatio
 
 
     let mut name = None;
-    let mut addr = None;
+    let mut var  = Variable{cu_name: cu_name, addr: 0};
 
     let mut attrs = die.attrs();
     while let Some(attr) = attrs.next()? {
@@ -281,18 +290,17 @@ fn add_variable<'input, 'abbrev, 'unit, Endian>(die: &gimli::DebuggingInformatio
             gimli::DW_AT_location => {
                 //println!("DW_AT_location: {:?}", attr);
                 match attr.value() {
-                    //gimli::AttributeValue::Addr(addr) => variable.location = Some(addr),
                     gimli::AttributeValue::Exprloc(gimli::EndianBuf(buf, _)) => {
                         if let Some((&first, elements)) = buf.split_first() {
                             if gimli::DwOp(first) == gimli::DW_OP_addr {
-                                addr = match elements.len() {
+                                var.addr = match elements.len() {
                                     4 => {
-                                        Some(Endian::read_u32(elements) as u64)
+                                        Endian::read_u32(elements) as u64
                                     }
                                     8 => {
-                                        Some(Endian::read_u64(elements))
+                                        Endian::read_u64(elements)
                                     }
-                                    _ => {None}
+                                    _ => 0
                                 }
                             } else {
                                 // We only interest on variables that has fixed address.
@@ -327,9 +335,9 @@ fn add_variable<'input, 'abbrev, 'unit, Endian>(die: &gimli::DebuggingInformatio
         }
     }
 
-    if let Some(n) = name{
-        if let Some(a) = addr {
-            out.insert(n, a);
+    if let Some(n) = name {
+        if var.addr != 0 {
+            out.insert(n, var);
         }
     }
     Ok(())
